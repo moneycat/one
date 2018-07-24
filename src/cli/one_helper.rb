@@ -16,6 +16,9 @@
 
 require 'cli_helper'
 
+require 'open3'
+require 'io/console'
+
 begin
     require 'opennebula'
 rescue Exception => e
@@ -507,49 +510,115 @@ EOT
 
 
         def list_pool(options, top=false, filter_flag=nil)
-            if options[:describe]
-                table = format_pool(options)
+            table = format_pool(options)
 
+            if options[:describe]
                 table.describe_columns
+
                 return 0
             end
 
             filter_flag ||= OpenNebula::Pool::INFO_ALL
 
-            pool = factory_pool(filter_flag)
+            pool  = factory_pool(filter_flag)
 
+            #-------------------------------------------------------------------
+            # XML Output
+            #-------------------------------------------------------------------
             if options[:xml]
-                # TODO: use paginated functions
                 rc=pool.info
+
                 return -1, rc.message if OpenNebula.is_error?(rc)
                 return 0, pool.to_xml(true)
-            else
-                table = format_pool(options)
+            end
 
-                if top
-                    table.top(options) {
-                        array=pool.get_hash
-                        return -1, array.message if OpenNebula.is_error?(array)
-
-                        array
-                    }
-                else
-                    array=pool.get_hash
+            #-------------------------------------------------------------------
+            # top output
+            #-------------------------------------------------------------------
+            if top
+                table.top(options) {
+                    array = pool.get_hash
                     return -1, array.message if OpenNebula.is_error?(array)
 
-                    rname=self.class.rname
-                    elements=array["#{rname}_POOL"][rname]
-                    if options[:ids] && elements
-                        elements.reject! do |element|
-                            !options[:ids].include?(element['ID'].to_i)
-                        end
-                    end
-
-                    table.show(array, options)
-                end
+                    array
+                }
 
                 return 0
             end
+
+            #-------------------------------------------------------------------
+            # Interactive ouput (paginated) 
+            #-------------------------------------------------------------------
+            if $stdout.isatty 
+                size  = $stdout.winsize[0] - 1 
+                rname = self.class.rname
+
+                # Start pager, defaults to less TODO: respond to env ONE_PAGER
+                p_r, p_w = IO.pipe
+
+                lpid = fork do
+                    $stdin.reopen(p_r)
+
+                    p_r.close
+                    p_w.close
+
+                    Kernel.select [$stdin]
+
+                    exec(['less', 'less'])
+                end
+                
+                # Send listing to pager pipe
+                $stdout.close
+                $stdout = p_w.dup
+
+                p_w.close
+                p_r.close
+
+                current = 0
+
+                table.print_tty_header
+
+                options[:noheader] = true
+
+                loop do
+                    hash = pool.get_page_hash(size, current)
+
+                    return -1, hash.message if OpenNebula.is_error?(hash)
+
+                    current += size
+
+                    table.show(hash, options)
+
+                    $stdout.flush
+
+                    break if hash["#{rname}_POOL"][rname].length < size
+                end
+
+                $stdout.close
+
+                Process.wait(lpid)
+
+                return 0
+            end
+
+            #-------------------------------------------------------------------
+            # Non-Interactive ouput (full listing)
+            #-------------------------------------------------------------------
+            array = pool.get_hash
+            return -1, array.message if OpenNebula.is_error?(array)
+
+            rname    = self.class.rname
+            elements = array["#{rname}_POOL"][rname]
+
+            if options[:ids] && elements
+                elements.reject! do |element|
+                    !options[:ids].include?(element['ID'].to_i)
+                end
+            end
+
+            table.show(array, options)
+
+            return 0
         end
 
         def show_resource(id, options)
@@ -834,8 +903,11 @@ EOT
         end
     end
 
-    def OpenNebulaHelper.time_to_str(time, print_seconds=true, print_hours=true, print_years=false)
-        value=time.to_i
+    def OpenNebulaHelper.time_to_str(time, print_seconds=true, 
+        print_hours=true, print_years=false)
+
+        value = time.to_i
+
         if value==0
             value='-'
         else

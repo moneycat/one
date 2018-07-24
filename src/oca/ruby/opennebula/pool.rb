@@ -195,14 +195,15 @@ module OpenNebula
         #
         # size:: _Integer_ size of each page
         def info_paginated(size)
-            array=Array.new
-            current=0
+            array   = Array.new
+            current = 0
 
-            parser=ParsePoolSax.new(@pool_name, @element_name)
+            parser = ParsePoolSax.new(@pool_name, @element_name)
 
             while true
-                a=@client.call("#{@pool_name.delete('_').downcase}.info",
-                    @user_id, current, -size, -1)
+                a = @client.call("#{@pool_name.delete('_').downcase}.info",
+                        @user_id, current, -size, -1)
+
                 return a if OpenNebula.is_error?(a)
 
                 a_array=parser.parse(a)
@@ -214,9 +215,43 @@ module OpenNebula
             end
 
             array.compact!
-            array=nil if array.length == 0
+            array = nil if array.length == 0
 
             array
+        end
+
+        # Gets a hash from a info page from pool
+        # size:: nil => default page size
+        #        > 0 => page size    
+        # current first element of the page
+        def get_page_hash(size, current)
+            allow_paginated = PAGINATED_POOLS.include?(@pool_name)
+            size            = OpenNebula.pool_page_size if (!size || size == 0)
+
+            if allow_paginated 
+                parser = ParsePoolSax.new(@pool_name, @element_name)
+
+                a = @client.call("#{@pool_name.delete('_').downcase}.info",
+                        @user_id, current, -size, -1)
+
+                return a if OpenNebula.is_error?(a)
+
+                hash = parser.parse(a)
+
+                if hash
+                    hash.compact! 
+
+                    hash = nil if hash.length == 0
+                end
+
+                { @pool_name => { @element_name => hash } }
+            else
+                rc = info
+
+                return rc if OpenNebula.is_error?(rc)
+
+                to_hash
+            end
         end
     end
 end
