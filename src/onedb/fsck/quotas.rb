@@ -91,6 +91,9 @@ module OneDBFsck
         cpu_used = 0
         mem_used = 0
         vms_used = 0
+        running_cpu_used = 0
+        running_mem_used = 0
+        running_vms_used = 0
         sys_used = 0
 
         # VNet quotas
@@ -104,64 +107,7 @@ module OneDBFsck
             vmdoc = nokogiri_doc(vm_row[:body])
 
             # VM quotas
-            vmdoc.root.xpath("TEMPLATE/CPU").each { |e|
-                # truncate to 2 decimals
-                cpu = (e.text.to_f * 100).to_i
-                cpu_used += cpu
-            }
-
-            vmdoc.root.xpath("TEMPLATE/MEMORY").each { |e|
-                mem_used += e.text.to_i
-            }
-
-            vmdoc.root.xpath("TEMPLATE/DISK").each { |e|
-                type = ""
-
-                e.xpath("TYPE").each { |t_elem|
-                    type = t_elem.text.upcase
-                }
-
-                size = 0
-
-                if !e.at_xpath("SIZE").nil?
-                    size = e.at_xpath("SIZE").text.to_i
-                end
-
-                if ( type == "SWAP" || type == "FS")
-                    sys_used += size
-                else
-                    if !e.at_xpath("CLONE").nil?
-                        clone = (e.at_xpath("CLONE").text.upcase == "YES")
-
-                        target = nil
-
-                        if clone
-                            target = e.at_xpath("CLONE_TARGET").text if !e.at_xpath("CLONE_TARGET").nil?
-                        else
-                            target = e.at_xpath("LN_TARGET").text if !e.at_xpath("LN_TARGET").nil?
-                        end
-
-                        if !target.nil? && target == "SYSTEM"
-                            sys_used += size
-
-                            if !e.at_xpath("DISK_SNAPSHOT_TOTAL_SIZE").nil?
-                                sys_used += e.at_xpath("DISK_SNAPSHOT_TOTAL_SIZE").text.to_i
-                            end
-                        elsif !target.nil? && target == "SELF"
-                            datastore_id = e.at_xpath("DATASTORE_ID").text
-                            datastore_usage[datastore_id] ||= 0
-                            datastore_usage[datastore_id] += size
-
-                            if !e.at_xpath("DISK_SNAPSHOT_TOTAL_SIZE").nil?
-                                datastore_usage[datastore_id] += e.at_xpath("DISK_SNAPSHOT_TOTAL_SIZE").text.to_i
-                            end
-                        end
-                    end
-                end
-            }
-
-            vms_used += 1
-
+            mem_used, cpu_used, vms_used, running_mem_used, running_cpu_used, running_vms_used, sys_used = calculate_vm_quotas(vmdoc, mem_used, cpu_used, vms_used, running_mem_used, running_cpu_used, running_vms_used, sys_used)
             # VNet quotas
             vmdoc.root.xpath("TEMPLATE/NIC/NETWORK_ID").each { |e|
                 vnet_usage[e.text] = 0 if vnet_usage[e.text].nil?
@@ -200,69 +146,7 @@ module OneDBFsck
         end
 
         # VM quotas
-
-        vm_elem = nil
-        doc.root.xpath("VM_QUOTA/VM").each { |e| vm_elem = e }
-
-        if vm_elem.nil?
-            doc.root.xpath("VM_QUOTA").each { |e| e.remove }
-
-            vm_quota  = doc.root.add_child(doc.create_element("VM_QUOTA"))
-            vm_elem   = vm_quota.add_child(doc.create_element("VM"))
-
-            vm_elem.add_child(doc.create_element("CPU")).content         = "-1"
-            vm_elem.add_child(doc.create_element("CPU_USED")).content    = "0"
-
-            vm_elem.add_child(doc.create_element("MEMORY")).content      = "-1"
-            vm_elem.add_child(doc.create_element("MEMORY_USED")).content = "0"
-
-            vm_elem.add_child(doc.create_element("VMS")).content         = "-1"
-            vm_elem.add_child(doc.create_element("VMS_USED")).content    = "0"
-
-            vm_elem.add_child(doc.create_element("SYSTEM_DISK_SIZE")).content       = "-1"
-            vm_elem.add_child(doc.create_element("SYSTEM_DISK_SIZE_USED")).content  = "0"
-        end
-
-        vm_elem.xpath("CPU_USED").each { |e|
-            # Because of bug http://dev.opennebula.org/issues/1567 the element
-            # may contain a float number in scientific notation.
-
-            # Check if the float value or the string representation mismatch,
-            # but ignoring the precision
-
-            cpu_used = (cpu_used / 100.0)
-
-            different = ( e.text.to_f != cpu_used ||
-                ![sprintf('%.2f', cpu_used), sprintf('%.1f', cpu_used), sprintf('%.0f', cpu_used)].include?(e.text)  )
-
-            cpu_used_str = sprintf('%.2f', cpu_used)
-
-            if different
-                log_error("#{resource} #{oid} quotas: CPU_USED has #{e.text} \tis\t#{cpu_used_str}")
-                e.content = cpu_used_str
-            end
-        }
-
-        vm_elem.xpath("MEMORY_USED").each { |e|
-            if e.text != mem_used.to_s
-                log_error("#{resource} #{oid} quotas: MEMORY_USED has #{e.text} \tis\t#{mem_used}")
-                e.content = mem_used.to_s
-            end
-        }
-
-        vm_elem.xpath("VMS_USED").each { |e|
-            if e.text != vms_used.to_s
-                log_error("#{resource} #{oid} quotas: VMS_USED has #{e.text} \tis\t#{vms_used}")
-                e.content = vms_used.to_s
-            end
-        }
-
-        vm_elem.xpath("SYSTEM_DISK_SIZE_USED").each { |e|
-            if e.text != sys_used.to_s
-                log_error("#{resource} #{oid} quotas: SYSTEM_DISK_SIZE_USED has #{e.text} \tis\t#{sys_used}")
-                e.content = sys_used.to_s
-            end
-        }
+        check_vms_quotas(doc, resource, oid, mem_used, cpu_used, vms_used, running_mem_used, running_cpu_used, running_vms_used, sys_used)
 
         # VNet quotas
 
@@ -401,6 +285,176 @@ module OneDBFsck
             new_elem.add_child(doc.create_element("SIZE")).content = "-1"
             new_elem.add_child(doc.create_element("SIZE_USED")).content = size_used.to_s
         }
+    end
+
+    def calculate_vm_quotas(vmdoc, mem_used, cpu_used, vms_used, running_mem_used, running_cpu_used, running_vms_used, sys_used)
+
+        vmdoc.root.xpath("TEMPLATE/CPU").each { |e|
+            # truncate to 2 decimals
+            cpu = (e.text.to_f * 100).to_i
+            cpu_used += cpu
+        }
+
+        vmdoc.root.xpath("TEMPLATE/MEMORY").each { |e|
+            mem_used += e.text.to_i
+        }
+
+        vmdoc.root.xpath("TEMPLATE/DISK").each { |e|
+
+            type = ""
+
+            e.xpath("TYPE").each { |t_elem|
+                type = t_elem.text.upcase
+            }
+
+            size = 0
+
+            if !e.at_xpath("SIZE").nil?
+                size = e.at_xpath("SIZE").text.to_i
+            end
+
+            if ( type == "SWAP" || type == "FS") # is_volatile
+                sys_used += size
+            end
+
+            if !e.at_xpath("DISK_SNAPSHOT_TOTAL_SIZE").nil?
+                sys_used += e.at_xpath("DISK_SNAPSHOT_TOTAL_SIZE").text.to_i
+            end
+
+            if !e.at_xpath("CLONE").nil?
+                clone = (e.at_xpath("CLONE").text.upcase == "YES")
+
+                target = nil
+
+                if clone
+                    target = e.at_xpath("CLONE_TARGET").text if !e.at_xpath("CLONE_TARGET").nil?
+                else
+                    target = e.at_xpath("LN_TARGET").text if !e.at_xpath("LN_TARGET").nil?
+                end
+
+                if !target.nil? && target == "SYSTEM"
+                    sys_used += size
+                end
+            end
+        }
+
+        vms_used += 1
+
+        vmdoc.root.xpath("STATE").each { |e|
+            state = e.text.to_i
+            if state == 1 || state == 2 || state == 3 # PENDING | HOLD | ACTIVE
+                running_cpu_used = cpu_used
+                running_mem_used = mem_used
+                running_vms_used = vms_used
+            end
+        }
+
+        return mem_used, cpu_used, vms_used, running_mem_used, running_cpu_used, running_vms_used, sys_used
+    end
+
+    def check_vms_quotas(doc, resource, oid, mem_used, cpu_used, vms_used, running_mem_used, running_cpu_used, running_vms_used, sys_used)
+
+        vm_elem = nil
+        doc.root.xpath("VM_QUOTA/VM").each { |e| vm_elem = e }
+
+        if vm_elem.nil?
+            doc.root.xpath("VM_QUOTA").each { |e| e.remove }
+
+            vm_quota  = doc.root.add_child(doc.create_element("VM_QUOTA"))
+            vm_elem   = vm_quota.add_child(doc.create_element("VM"))
+
+            vm_elem.add_child(doc.create_element("CPU")).content         = "-1"
+            vm_elem.add_child(doc.create_element("CPU_USED")).content    = "0"
+
+            vm_elem.add_child(doc.create_element("MEMORY")).content      = "-1"
+            vm_elem.add_child(doc.create_element("MEMORY_USED")).content = "0"
+
+            vm_elem.add_child(doc.create_element("VMS")).content         = "-1"
+            vm_elem.add_child(doc.create_element("VMS_USED")).content    = "0"
+
+            vm_elem.add_child(doc.create_element("RUNNING_CPU")).content         = "-1"
+            vm_elem.add_child(doc.create_element("RUNNING_CPU_USED")).content    = "0"
+
+            vm_elem.add_child(doc.create_element("RUNNING_MEMORY")).content      = "-1"
+            vm_elem.add_child(doc.create_element("RUNNING_MEMORY_USED")).content = "0"
+
+            vm_elem.add_child(doc.create_element("RUNNING_VMS")).content         = "-1"
+            vm_elem.add_child(doc.create_element("RUNNING_VMS_USED")).content    = "0"
+
+            vm_elem.add_child(doc.create_element("SYSTEM_DISK_SIZE")).content       = "-1"
+            vm_elem.add_child(doc.create_element("SYSTEM_DISK_SIZE_USED")).content  = "0"
+        end
+
+        vm_elem.xpath("CPU_USED").each { |e|
+            # Because of bug http://dev.opennebula.org/issues/1567 the element
+            # may contain a float number in scientific notation.
+
+            # Check if the float value or the string representation mismatch,
+            # but ignoring the precision
+
+            cpu_used = (cpu_used / 100.0)
+
+            different = ( e.text.to_f != cpu_used ||
+                ![sprintf('%.2f', cpu_used), sprintf('%.1f', cpu_used), sprintf('%.0f', cpu_used)].include?(e.text)  )
+
+            cpu_used_str = sprintf('%.2f', cpu_used)
+
+            if different
+                log_error("#{resource} #{oid} quotas: CPU_USED has #{e.text} \tis\t#{cpu_used_str}")
+                e.content = cpu_used_str
+            end
+        }
+
+        vm_elem.xpath("MEMORY_USED").each { |e|
+            if e.text != mem_used.to_s
+                log_error("#{resource} #{oid} quotas: MEMORY_USED has #{e.text} \tis\t#{mem_used}")
+                e.content = mem_used.to_s
+            end
+        }
+
+        vm_elem.xpath("VMS_USED").each { |e|
+            if e.text != vms_used.to_s
+                log_error("#{resource} #{oid} quotas: VMS_USED has #{e.text} \tis\t#{vms_used}")
+                e.content = vms_used.to_s
+            end
+        }
+
+        vm_elem.xpath("RUNNING_CPU_USED").each { |e|
+
+            running_cpu_used = (running_cpu_used / 100.0)
+
+            different = ( e.text.to_f != running_cpu_used ||
+                ![sprintf('%.2f', running_cpu_used), sprintf('%.1f', running_cpu_used), sprintf('%.0f', running_cpu_used)].include?(e.text)  )
+
+            running_cpu_used_str = sprintf('%.2f', running_cpu_used)
+
+            if different
+                log_error("#{resource} #{oid} quotas: RUNNING_CPU_USED has #{e.text} \tis\t#{running_cpu_used_str}")
+                e.content = running_cpu_used_str
+            end
+        }
+
+        vm_elem.xpath("RUNNING_MEMORY_USED").each { |e|
+            if e.text != running_mem_used.to_s
+                log_error("#{resource} #{oid} quotas: RUNNING_MEMORY_USED has #{e.text} \tis\t#{running_mem_used}")
+                e.content = running_mem_used.to_s
+            end
+        }
+
+        vm_elem.xpath("RUNNING_VMS_USED").each { |e|
+            if e.text != running_vms_used.to_s
+                log_error("#{resource} #{oid} quotas: RUNNING_VMS_USED has #{e.text} \tis\t#{running_vms_used}")
+                e.content = running_vms_used.to_s
+            end
+        }
+
+        vm_elem.xpath("SYSTEM_DISK_SIZE_USED").each { |e|
+            if e.text != sys_used.to_s
+                log_error("#{resource} #{oid} quotas: SYSTEM_DISK_SIZE_USED has #{e.text} \tis\t#{sys_used}")
+                e.content = sys_used.to_s
+            end
+        }
+
     end
 end
 
