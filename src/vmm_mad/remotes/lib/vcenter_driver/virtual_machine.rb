@@ -1,6 +1,24 @@
-module VCenterDriver
+# -------------------------------------------------------------------------- #
+# Copyright 2002-2018, OpenNebula Project, OpenNebula Systems                #
+#                                                                            #
+# Licensed under the Apache License, Version 2.0 (the "License"); you may    #
+# not use this file except in compliance with the License. You may obtain    #
+# a copy of the License at                                                   #
+#                                                                            #
+# http://www.apache.org/licenses/LICENSE-2.0                                 #
+#                                                                            #
+# Unless required by applicable law or agreed to in writing, software        #
+# distributed under the License is distributed on an "AS IS" BASIS,          #
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.   #
+# See the License for the specific language governing permissions and        #
+# limitations under the License.                                             #
+#--------------------------------------------------------------------------- #
+
 require 'digest'
 require 'resolv'
+
+module VCenterDriver
+
 class VirtualMachineFolder
     attr_accessor :item, :items
 
@@ -71,6 +89,9 @@ class Template
     def unlock
         if @locking
             @locking_file.close
+            if File.exist?("/tmp/vcenter-importer-lock")
+                File.delete("/tmp/vcenter-importer-lock")
+            end
         end
     end
 
@@ -857,6 +878,10 @@ class Template
         self['runtime.host.parent.resourcePool']
     end
 
+    def get_esx_name
+        self['runtime.host.name']
+    end
+
     def vm_to_one(vm_name)
 
         str = "NAME   = \"#{vm_name}\"\n"\
@@ -1140,6 +1165,14 @@ class VirtualMachine < Template
     # set the vmware item directly to the vm
     def set_item(item)
         @item = item
+    end
+
+    def disk_real_path(disk, disk_id)
+        sppath = disk["SOURCE"].split(".")
+
+        raise "vm image path error!" if sppath.size != 2 || sppath.last != 'vmdk'
+
+        img_path = "#{sppath[0]}-#{@vm_id}-#{disk_id}.#{sppath[1]}"
     end
 
     # The OpenNebula host
@@ -1450,6 +1483,19 @@ class VirtualMachine < Template
         return self['_ref']
     end
 
+    # This method raises an exception if the timeout is reached
+    # The exception needs to be handled in the VMM drivers and any
+    # process that uses this method
+    def wait_deploy_timeout
+        timeout_deploy = @vi_client.get_property_vcenter_conf(:vm_poweron_wait_default)
+        timeout_deploy = 300 if timeout_deploy.nil?
+        time_start = Time.now
+        begin
+            time_running = Time.now - time_start
+            sleep(2)
+        end until(is_powered_on? && time_running.to_i < timeout_deploy)
+        raise 'Reached deploy timeout' if time_running.to_i >= timeout_deploy
+    end
 
     def storagepod_clonevm_task(vc_template, vcenter_name, clone_spec, storpod, vcenter_vm_folder_object, dc)
 
@@ -2898,7 +2944,14 @@ class VirtualMachine < Template
             # retrieve host from DRS
             resourcepool = config[:cluster].resourcePool
 
+            #relocate_spec_params = {}
+            #relocate_spec_params[:pool] = resourcepool
+            #relocate_spec = RbVmomi::VIM.VirtualMachineRelocateSpec(relocate_spec_params)
+            #@item.RelocateVM_Task(spec: relocate_spec, priority: "defaultPriority").wait_for_completion
+
             @item.MigrateVM_Task(:pool=> resourcepool, :priority => "defaultPriority").wait_for_completion
+
+            return get_esx_name
         rescue Exception => e
             raise "Cannot migrate VM #{e.message}\n#{e.backtrace.join("\n")}"
         end
@@ -2947,10 +3000,8 @@ class VirtualMachine < Template
     end
 
     def poweron
-        ## If need in the future, you can power on VMs from datacenter
-        ## dc = get_dc
-        ## dc.power_on_vm(@item)
         @item.PowerOnVM_Task.wait_for_completion
+        wait_deploy_timeout
     end
 
     def is_powered_on?
@@ -3311,7 +3362,7 @@ class VirtualMachine < Template
         end
     end
 
-    # STATIC MEMBERS AND CONSTRUCTORS
+    # STATIC MEMBERS, ROUTINES AND CONSTRUCTORS
     ###############################################################################################
 
     def self.get_vm(opts = {})
@@ -3333,6 +3384,35 @@ class VirtualMachine < Template
         end
 
         return one_vm
+    end
+
+    def self.migrate_routine(vm_id, src_host, dst_host, ds = nil)
+        one_client = OpenNebula::Client.new
+        pool = OpenNebula::HostPool.new(one_client)
+        pool.info
+
+        src_id = pool["/HOST_POOL/HOST[NAME='#{src_host}']/ID"].to_i
+        dst_id = pool["/HOST_POOL/HOST[NAME='#{dst_host}']/ID"].to_i
+
+        vi_client = VCenterDriver::VIClient.new_from_host(src_id)
+
+        # required one objects
+        vm = OpenNebula::VirtualMachine.new_with_id(vm_id, one_client)
+        dst_host = OpenNebula::Host.new_with_id(dst_id, one_client)
+
+        # get info
+        vm.info
+        dst_host.info
+
+        # required vcenter objects
+        vc_vm = VCenterDriver::VirtualMachine.new_without_id(vi_client, vm['/VM/DEPLOY_ID'])
+        ccr_ref  = dst_host['/HOST/TEMPLATE/VCENTER_CCR_REF']
+        vc_host  = VCenterDriver::ClusterComputeResource.new_from_ref(ccr_ref, vi_client).item
+
+        config = { :cluster => vc_host }
+        esx = vc_vm.migrate(config)
+
+        vm.replace({ 'VCENTER_CCR_REF' => ccr_ref, 'VCENTER_ESX_HOST' => esx })
     end
 
     # Try to build the vcenterdriver virtualmachine without

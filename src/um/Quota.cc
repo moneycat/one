@@ -381,6 +381,7 @@ int Quota::update_limits(
         {
             limit_f = DEFAULT;
         }
+
             // Negative. Default & unlimited allowed
         if (( !is_default && limit_f < 0 && limit_f != UNLIMITED && limit_f != DEFAULT )
             ||
@@ -415,7 +416,10 @@ VectorAttribute * Quota::new_quota(VectorAttribute * va)
 
         limit = va->vector_value_str(metrics[i], limit_f);
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> master-juan
         if (limit == "")
         {
             limit_f = DEFAULT;

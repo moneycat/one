@@ -183,7 +183,12 @@ end
 
 set :cloud_auth, $cloud_auth
 
-$views_config = SunstoneViews.new($conf[:mode])
+begin
+    $views_config = SunstoneViews.new($conf[:mode])
+rescue StandardError => e
+    logger.error { e.message }
+    exit -1
+end
 
 #start VNC proxy
 
@@ -208,7 +213,7 @@ SUPPORT = {
     :author_name => "OpenNebula Support Team",
     :support_subscription => "http://opennebula.systems/support/",
     :account => "http://opennebula.systems/buy/",
-    :docs => "http://docs.opennebula.org/5.5/",
+    :docs => "http://docs.opennebula.org/5.7/",
     :community => "http://opennebula.org/support/community/",
     :project => "OpenNebula"
 }
