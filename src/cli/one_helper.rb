@@ -508,6 +508,220 @@ EOT
             end
         end
 
+        #-----------------------------------------------------------------------
+        #  List pool functions
+        #-----------------------------------------------------------------------
+        def start_pager
+            pager = ENV['ONE_PAGER'] || 'less'
+
+            # Start pager, defaults to less
+            p_r, p_w = IO.pipe
+
+            lpid = fork do
+                $stdin.reopen(p_r)
+
+                p_r.close
+                p_w.close
+
+                Kernel.select [$stdin]
+
+                exec([pager, pager])
+            end
+            
+            # Send listing to pager pipe
+            $stdout.close
+            $stdout = p_w.dup
+
+            p_w.close
+            p_r.close
+
+            return lpid
+        end
+
+        def stop_pager(lpid)
+            $stdout.close
+
+            Process.wait(lpid)
+        end
+
+        def print_page(pool, options)
+            page = nil
+
+            if options[:xml]
+                elements = 0
+                page     = ""
+
+                pool.each {|e| 
+                    elements += 1 
+                    page << e.to_xml(true) << "\n"
+                }
+            else
+            
+                pname = pool.pool_name
+                ename = pool.element_name
+
+                page  = pool.to_hash
+                elems = page["#{pname}"]["#{ename}"]
+
+                if elems.class == Array
+                    elements = elems.length
+                else
+                    elements = 1
+                end
+            end
+
+            return elements, page
+        end
+
+        #-----------------------------------------------------------------------
+        # List the pool in table form, it uses pagination for interactive
+        # output
+        #-----------------------------------------------------------------------
+        def list_pool_table(table, pool, options, filter_flag)
+            if $stdout.isatty 
+                size = $stdout.winsize[0] - 1 
+
+                # ----------- First page, check if pager is needed -------------
+                rc = pool.get_page(size, 0)
+                ps = ""
+
+                return -1, rc.message if OpenNebula.is_error?(rc)
+
+                elements, hash = print_page(pool, options)
+
+                ppid = -1
+
+                if elements >= size
+                    ppid = start_pager
+                end
+
+                table.show(hash, options)
+
+                if elements < size
+                    return 0
+                end
+
+                # ------- Rest of the pages in the pool, piped to pager --------
+                current = size
+
+                options[:noheader] = true
+
+                loop do
+                    rc = pool.get_page(size, current)
+
+                    return -1, rc.message if OpenNebula.is_error?(rc)
+
+                    current += size
+
+                    elements, hash = print_page(pool, options)
+
+                    table.show(hash, options)
+
+                    $stdout.flush
+
+                    break if elements < size
+                end
+
+                stop_pager(ppid)
+            else
+                array = pool.get_hash
+                return -1, array.message if OpenNebula.is_error?(array)
+
+                rname    = self.class.rname
+                elements = array["#{rname}_POOL"][rname]
+
+               if options[:ids] && elements
+                    elements.reject! do |element|
+                        !options[:ids].include?(element['ID'].to_i)
+                    end
+                end
+
+                table.show(array, options)
+            end
+
+            return 0
+        end
+
+        #-----------------------------------------------------------------------
+        # List pool in XML format, pagination is used in interactive output
+        #-----------------------------------------------------------------------
+        def list_pool_xml(pool, options, filter_flag)
+            if $stdout.isatty 
+                size = $stdout.winsize[0] - 1 
+
+                # ----------- First page, check if pager is needed -------------
+                rc = pool.get_page(size, 0)
+                ps = ""
+
+                return -1, rc.message if OpenNebula.is_error?(rc)
+
+                pname = pool.pool_name
+
+                elements, page = print_page(pool, options)
+
+                ppid = -1
+
+                if elements >= size
+                    ppid = start_pager
+                end
+
+                puts "<#{pname}>"
+
+                puts page
+
+                if elements < size
+                    puts "</#{pname}>"
+                    return 0
+                end
+
+                # ------- Rest of the pages in the pool, piped to pager --------
+                current = size
+
+                loop do
+                    rc = pool.get_page(size, current)
+
+                    return -1, rc.message if OpenNebula.is_error?(rc)
+
+                    current += size
+
+                    elements, page = print_page(pool, options)
+
+                    puts page
+
+                    $stdout.flush
+
+                    break if elements < size
+                end
+
+                puts "</#{pname}>"
+
+                stop_pager(ppid)
+            else
+                rc = pool.info
+
+                return -1, rc.message if OpenNebula.is_error?(rc)
+
+                puts pool.to_xml(true)
+            end
+
+            return 0
+        end
+
+        #-----------------------------------------------------------------------
+        # List pool table in top-like form
+        #-----------------------------------------------------------------------
+        def list_pool_top(table, pool, options)
+            table.top(options) {
+                array = pool.get_hash
+
+                return -1, array.message if OpenNebula.is_error?(array)
+
+                array
+            }
+
+            return 0
+        end
+
 
         def list_pool(options, top=false, filter_flag=nil)
             table = format_pool(options)
@@ -522,101 +736,13 @@ EOT
 
             pool  = factory_pool(filter_flag)
 
-            #-------------------------------------------------------------------
-            # XML Output
-            #-------------------------------------------------------------------
-            if options[:xml]
-                rc=pool.info
-
-                return -1, rc.message if OpenNebula.is_error?(rc)
-                return 0, pool.to_xml(true)
-            end
-
-            #-------------------------------------------------------------------
-            # top output
-            #-------------------------------------------------------------------
             if top
-                table.top(options) {
-                    array = pool.get_hash
-                    return -1, array.message if OpenNebula.is_error?(array)
-
-                    array
-                }
-
-                return 0
+                return list_pool_top(table, pool, options)
+            elsif options[:xml]
+                return list_pool_xml(pool, options, filter_flag)
+            else
+                return list_pool_table(table, pool, options, filter_flag)
             end
-
-            #-------------------------------------------------------------------
-            # Interactive ouput (paginated) 
-            #-------------------------------------------------------------------
-            if $stdout.isatty 
-                size  = $stdout.winsize[0] - 1 
-                rname = self.class.rname
-
-                # Start pager, defaults to less TODO: respond to env ONE_PAGER
-                p_r, p_w = IO.pipe
-
-                lpid = fork do
-                    $stdin.reopen(p_r)
-
-                    p_r.close
-                    p_w.close
-
-                    Kernel.select [$stdin]
-
-                    exec(['less', 'less'])
-                end
-                
-                # Send listing to pager pipe
-                $stdout.close
-                $stdout = p_w.dup
-
-                p_w.close
-                p_r.close
-
-                current = 0
-
-                table.print_tty_header
-
-                options[:noheader] = true
-
-                loop do
-                    hash = pool.get_page_hash(size, current)
-
-                    return -1, hash.message if OpenNebula.is_error?(hash)
-
-                    current += size
-
-                    table.show(hash, options)
-
-                    $stdout.flush
-
-                    break if hash["#{rname}_POOL"][rname].length < size
-                end
-
-                $stdout.close
-
-                Process.wait(lpid)
-
-                return 0
-            end
-
-            #-------------------------------------------------------------------
-            # Non-Interactive ouput (full listing)
-            #-------------------------------------------------------------------
-            array = pool.get_hash
-            return -1, array.message if OpenNebula.is_error?(array)
-
-            rname    = self.class.rname
-            elements = array["#{rname}_POOL"][rname]
-
-            if options[:ids] && elements
-                elements.reject! do |element|
-                    !options[:ids].include?(element['ID'].to_i)
-                end
-            end
-
-            table.show(array, options)
 
             return 0
         end

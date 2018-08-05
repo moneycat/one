@@ -472,7 +472,8 @@ void RequestManagerPoolInfoFilter::dump(
     Nebula::instance().get_configuration_attribute(att.uid, att.gid, 
             "API_LIST_ORDER", desc);
 
-    rc = pool->dump(oss, where_string, limit_clause, desc == "desc");
+    rc = pool->dump(oss, where_string, limit_clause,
+            one_util::toupper(desc) == "DESC");
 
     if ( rc != 0 )
     {
@@ -541,7 +542,7 @@ void VirtualNetworkPoolInfo::request_execute(
             "API_LIST_ORDER", desc);
 
     int rc = pool->dump(pool_oss, where_string.str(), limit_clause.str(),
-            desc == "desc");
+            one_util::toupper(desc) == "DESC");
 
     if ( rc != 0 )
     {
