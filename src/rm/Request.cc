@@ -20,8 +20,10 @@
 
 #include "PoolObjectAuth.h"
 
-#define MAX_HOST      1025
-#define MAX_SERV      32
+#include <xmlrpc-c/abyss.h>
+
+#include <sys/socket.h>
+#include <netdb.h>
 
 /* -------------------------------------------------------------------------- */
 /* -------------------------------------------------------------------------- */
@@ -77,18 +79,52 @@ string Request::object_name(PoolObjectSQL::ObjectType ob)
 /* -------------------------------------------------------------------------- */
 /* -------------------------------------------------------------------------- */
 
+static void get_client_ip(const xmlrpc_c::callInfo * call_info, char * const
+        ip, char * const port)
+{
+    struct abyss_unix_chaninfo * unix_ci;
+
+    const xmlrpc_c::callInfo_serverAbyss * abyss_ci =
+            static_cast<const xmlrpc_c::callInfo_serverAbyss *>(call_info);
+
+    SessionGetChannelInfo(abyss_ci->abyssSessionP, (void **) &unix_ci);
+
+    // -------------------------------------------------------------------------
+    // NOTE: This only works for IPv4 as abyss_unix_chaninfo is not IPv6 ready
+    // it should use sockaddr_storage for peerAddr, and set peerAddrLen properly
+    // This could be bypassed with getpeername if library exposes access to
+    // channel implementation, i.e. socket fd
+    // -------------------------------------------------------------------------
+
+    int rc = getnameinfo(&(unix_ci->peerAddr), unix_ci->peerAddrLen, ip,
+            NI_MAXHOST, port, NI_MAXSERV, NI_NUMERICHOST|NI_NUMERICSERV);
+
+    if ( rc != 0 )
+    {
+        ip[0] = '-';
+        ip[1] = '\0';
+
+        port[0] = '-';
+        port[1] = '\0';
+    }
+}
+
 void Request::log_method_invoked(const RequestAttributes& att,
         const xmlrpc_c::paramList&  paramList, const string& format_str,
         const std::string& method_name, const std::set<int>& hidden_params,
-        const xmlrpc_c::callInfo * callInfoPtr)
+        const xmlrpc_c::callInfo * call_info)
 {
     std::ostringstream oss;
     std::ostringstream oss_limit;
 
-    tcpPortAddr retval = resolve_ip_addr(callInfoPtr);
-
     int limit = DEFAULT_LOG_LIMIT;
     char mod;
+
+    char ip[NI_MAXHOST];
+    char port[NI_MAXSERV];
+
+    ip[0]   = '\0';
+    port[0] = '\0';
 
     for (unsigned int j = 0 ;j < format_str.length() - 1; j++ )
     {
@@ -171,11 +207,21 @@ void Request::log_method_invoked(const RequestAttributes& att,
                 break;
 
                 case 'A':
-                    oss << retval.host;
+                    if ( ip[0] == '\0' )
+                    {
+                        get_client_ip(call_info, ip, port);
+                    }
+
+                    oss << ip;
                 break;
 
                 case 'P':
-                    oss << retval.portNumber;
+                    if ( port[0] == '\0' )
+                    {
+                        get_client_ip(call_info, ip, port);
+                    }
+
+                    oss << port;
                 break;
 
                 default:
@@ -946,26 +992,3 @@ Request::ErrorCode Request::as_uid_gid(Template *         tmpl,
 
 /* -------------------------------------------------------------------------- */
 /* -------------------------------------------------------------------------- */
-
-tcpPortAddr Request::resolve_ip_addr(const xmlrpc_c::callInfo * callInfoPtr)
-{
-    struct tcpPortAddr retval;
-    char hostname[MAX_HOST];
-    char service[MAX_SERV];
-
-    const xmlrpc_c::callInfo_serverAbyss * const callInfoP(
-            dynamic_cast<const xmlrpc_c::callInfo_serverAbyss *>(callInfoPtr));
-
-    void * chanInfoPtr;
-    SessionGetChannelInfo(callInfoP->abyssSessionP, &chanInfoPtr);
-
-    struct abyss_unix_chaninfo * const chanInfoP(
-        static_cast<struct abyss_unix_chaninfo *>(chanInfoPtr));
-
-    getnameinfo(&chanInfoP->peerAddr, chanInfoP->peerAddrLen, hostname, sizeof(hostname), service, sizeof(service), 0);
-
-    retval.host = std::string(hostname);
-    retval.portNumber = std::string(service);
-
-    return retval;
-}

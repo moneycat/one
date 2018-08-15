@@ -19,8 +19,6 @@
 
 #include <xmlrpc-c/base.hpp>
 #include <xmlrpc-c/registry.hpp>
-#include <sys/socket.h>
-#include <netdb.h>
 
 #include "RequestManager.h"
 #include "AuthRequest.h"
@@ -131,11 +129,6 @@ public:
     }
 };
 
-struct tcpPortAddr {
-    string  host;
-    string  portNumber;
-};
-
 /**
  *  The Request Class represents the basic abstraction for the OpenNebula
  *  XML-RPC API. This interface must be implemented by any XML-RPC API call
@@ -178,6 +171,8 @@ public:
      *    %g -- group id
      *    %G -- group name
      *    %a -- auth token
+     *    %A -- client IP address (only IPv4)
+     *    %a -- client port (only IPv4)
      *    %% -- %
      */
     static void set_call_log_format(const string& log_format)
@@ -441,6 +436,7 @@ private:
      * @param paramList list of XML parameters
      * @param format_str for the log
      * @param hidden_params params not to be shown
+     * @param callInfoP information of client
      */
     static void log_method_invoked(const RequestAttributes& att,
         const xmlrpc_c::paramList&  paramList, const string& format_str,
@@ -461,15 +457,10 @@ private:
      *
      * @param v value to format
      * @param oss stream to write v
+     * @param limit of characters to wirte
      */
-    static void log_xmlrpc_value(const xmlrpc_c::value& v, std::ostringstream& oss, const int limit);
-
-    /**
-     *  Resolves the IP and PORT througth info ptr
-     *    @param callInfoPtr pointer to info structure
-     *  return struct with the IP and PORT
-     */
-    static tcpPortAddr resolve_ip_addr(const xmlrpc_c::callInfo * callInfoPtr);
+    static void log_xmlrpc_value(const xmlrpc_c::value& v,
+            std::ostringstream& oss, const int limit);
 
     // Default number of character to show in the log. Option %l<number>
     const static int DEFAULT_LOG_LIMIT = 20;
